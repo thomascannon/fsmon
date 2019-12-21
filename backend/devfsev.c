@@ -13,6 +13,11 @@
 #include <errno.h>
 #include "fsmon.h"
 
+#define WIP 1
+
+#define FM_DEV "/dev/fsevents"
+#define FM_BUFSIZE 4096
+
 #define R_MIN(x,y) (((x)>(y))?(y):(x))
 
 typedef struct __attribute__ ((__packed__)) {
@@ -27,7 +32,7 @@ typedef struct __attribute__ ((__packed__)) {
 } FMEventStruct;
 
 static void fsevent_free (FileMonitorEvent *ev) {
-	memset (ev, 0, sizeof (*ev));
+	memset (ev, 0, sizeof (FileMonitorEvent));
 	ev->type = -1;
 }
 
@@ -49,7 +54,7 @@ static int parse_event(FileMonitorEvent *ev, FMEventStruct *fme) {
 		ev->tstamp = fme->val.u64;
 		break;
 	case FSE_ARG_STRING: // This is a filename, for move/rename (Type 3)
-		ev->newfile = (const char *)(fme) + 12;
+//		ev->newfile = (const char *)(fme) + 12;
 		break;
 	case FSE_ARG_DEV: // Block Device associated with the mounted fs
 		dev = (dev_t *) &fme->val.u32;
@@ -67,9 +72,18 @@ static int parse_event(FileMonitorEvent *ev, FMEventStruct *fme) {
 		break;
 	case FSE_ARG_GID: // 0xb // 11 // This shuold be ARG_STRING or ARG_PATH
 		ev->gid = fme->val.u32;
-		ev->newfile = (const char *)(fme) + 12;
+		if (ev->type == FSE_RENAME) {
+			ev->newfile = (const char *)(fme) + 12;
+			if (*ev->newfile != '/') {
+				ev->newfile = NULL;
+				ev->type = FSE_CREATE_FILE;
+			}
+		} else {
+			ev->newfile = NULL;
+		}
 		break;
 	case FSE_ARG_PATH:
+		//ev->newfile = (const char *)(fme) + 12;
 		break;
 	case FSE_ARG_FINFO:
 		// Not handling this yet.. Not really used, either..
@@ -114,33 +128,34 @@ static int fdsetup(int fd) {
 	return cloned_fd;
 }
 
-int fm_begin (FileMonitor *fm) {
+static bool fm_begin (FileMonitor *fm) {
 	int fd;
 	fm->fd = -1;
 	fd = open (FM_DEV, O_RDONLY);
 	if (fd == -1) {
 		perror ("open "FM_DEV);
-		return 0;
+		return false;
 	}
 	fd = fdsetup (fd);
 	if (fd == -1) {
 		perror ("fdclone");
-		return 0;
+		return false;
 	}
 	fm->fd = fd;
-	return 1;
+	return true;
 }
 
-int fm_loop (FileMonitor *fm, FileMonitorCallback cb) {
+static bool fm_loop (FileMonitor *fm, FileMonitorCallback cb) {
 	FileMonitorEvent ev = {0};
 	uint8_t buf[FM_BUFSIZE] = {0};
 	int arg_len, rc, buf_idx = 0, buf_end = -1;
 
 	if (sizeof (FMEventStruct) != 12) {
 		eprintf ("Invalid FMEventStruct, check your compiler\n");
-		return 0;
+		return false;
 	}
-	for (;;) {
+
+	for (; fm->running; ) {
 		int rewind = 0;
 		if (buf_idx == buf_end) {
 			buf_idx = 0;
@@ -161,52 +176,83 @@ int fm_loop (FileMonitor *fm, FileMonitorCallback cb) {
 		rc = read (fm->fd, buf + buf_idx, FM_BUFSIZE - buf_idx);
 		// hexdump (buf+buf_idx, rc, 0); //arg_len + 2, 0);
 		if (rc < 1) {
-			perror ("read");
-			return 0;
+			if (errno != EINTR) {
+				perror ("read");
+			}
+			return false;
 		}
 		buf_idx = 0;
 		buf_end = buf_idx + rc;
 
-		if (fm->stop)
-			return 0;
-
 		if (buf_end >= sizeof (buf))
 			buf_end = sizeof (buf);
 		while (buf_idx + 1 < buf_end) {
+			// hexdump (buf+buf_idx, sizeof (FMEventStruct) + 32, 0);
 			FMEventStruct *fme = (FMEventStruct*) (buf + buf_idx);
 			/* initialize on first set */
 			if (ev.type == -1) {
 				ev.type = fme->type;
 				ev.pid = fme->val.u32;
-				ev.proc = ev.proc = getProcName (ev.pid, &ev.ppid);
+				ev.ppid = 0;
+				ev.proc = get_proc_name (ev.pid, &ev.ppid);
 				ev.file = (const char *)buf + buf_idx + sizeof (FMEventStruct);
 			}
 			/* parse data packet */
 			arg_len = parse_event (&ev, fme);
 			if (arg_len == -1) {
-				if (ev.pid && ev.type != -1 && cb) cb (fm, &ev);
+				if (ev.pid && ev.type != -1 && cb) {
+					cb (fm, &ev);
+				}
 				fsevent_free (&ev);
 				arg_len = 2;
 			} else if (arg_len < 1) {
 				arg_len = sizeof (FMEventStruct);
 			} else if (arg_len > (buf_end - buf_idx)) {
+#if WIP
+				int i;
+				bool found = false;
+				for (i = buf_idx + 1; i + sizeof (FMEventStruct) < buf_end; i++) {
+					if (!memcmp ("\x00\x00\xd4\x8f", buf +i, 4)) {
+						found = true;
+						break;
+					}
+				}
+				if (found) {
+					arg_len = i - buf_idx;
+					eprintf ("FCU %d\n", arg_len);
+				} else {
+					arg_len = sizeof (FMEventStruct) + 2;
+					eprintf ("Invalid length in fsevents data packet (%d, %d)\n",
+							arg_len, buf_end - buf_idx);
+					//arg_len += 12;
+					// hexdump (buf + buf_idx, buf_end - buf_idx, 0); //arg_len + 2, 0);
+				}
+#else
 				arg_len = sizeof (FMEventStruct) + 2;
 				eprintf ("Invalid length in fsevents data packet (%d, %d)\n",
-					arg_len, buf_end - buf_idx);
+						arg_len, buf_end - buf_idx);
+#endif
 			}
 			buf_idx += arg_len;
 		}
 	}
-	return 0;
+	return true;
 }
 
-int fm_end (FileMonitor *fm) {
-	if (fm->fd != -1)
+static bool fm_end(FileMonitor *fm) {
+	if (fm && fm->fd != -1) {
 		close (fm->fd);
-	memset (fm, 0, sizeof (FileMonitor));
-	return 0;
+		fm->fd = -1;
+		return true;
+	}
+	return false;
 }
 
-#else
-#error Unsupported platform
+FileMonitorBackend fmb_devfsev = {
+	.name = "devfsev",
+	.begin = fm_begin,
+	.loop = fm_loop,
+	.end = fm_end,
+};
+
 #endif

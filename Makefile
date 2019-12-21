@@ -1,29 +1,44 @@
 ARCHS=armv7 arm64
 
+CFLAGS+=-I.
+CFLAGS+=-Wall
+
+include config.mk
+CFLAGS+=-DFSMON_VERSION=\"$(VERSION)\"
+
+SOURCES=main.c util.c
+SOURCES+=backend/*.c
+
 ifeq ($(shell uname),Linux)
 
-CFLAGS+=-Wall
+# LINUX: GNU / ANDROID
+#     __
+#  -=(o '.
+#     \.-.\
+#     /|  \\
+#     '|  ||
+#      _\_):,_
+
+FANOTIFY_CFLAGS+=-DHAVE_FANOTIFY=1
+FANOTIFY_CFLAGS+=-DHAVE_SYS_FANOTIFY=1
 
 all: fsmon
 
 fsmon:
-	$(CC) -o fsmon $(CFLAGS) $(LDFLAGS) fsmon-linux.c main.c util.c
+	$(CC) -o fsmon $(CFLAGS) $(FANOTIFY_CFLAGS) $(LDFLAGS) $(SOURCES)
 
 DESTDIR?=
 PREFIX?=/usr
 
 clean:
 	rm -f fsmon
-
-install:
-	install -m 0755 fsmon $(DESTDIR)$(PREFIX)/bin/fsmon
-
-uninstall:
-	rm -f $(DESTDIR)$(PREFIX)/bin/fsmon
-
-.PHONY: all fsmon clean install uninstall
-
 else
+# APPLE: OSX / IOS / IWATCH
+#     _
+#    _\)/_
+#   /     \
+#   \     /
+#    \_._/
 
 DESTDIR?=
 PREFIX?=/usr/local
@@ -35,6 +50,7 @@ IOS_SYSROOT=$(shell xcrun --sdk iphoneos --show-sdk-path)
 IOS_CFLAGS+=-isysroot ${IOS_SYSROOT}
 IOS_CFLAGS+=-fembed-bitcode
 IOS_CFLAGS+=-flto
+#IOS_CFLAGS+=-Wl,-iphoneos_version_min,10.0
 IOS_CFLAGS+=-O3 -Wall
 IOS_CC=$(shell xcrun --sdk iphoneos --find clang) $(IOS_CFLAGS)
 
@@ -50,25 +66,52 @@ CFLAGS+=-g -ggdb
 
 OBJS=fsmon.o main.o
 
-all: ios osx wch
-	$(MAKE) fat
-	#scp fsmon-ios root@192.168.1.50:.
+all: osx
+
+oldios:
+	$(IOS_CC) $(CFLAGS) -DTARGET_IOS=1 -o fsmon-ios $(SOURCES) \
+		-framework CoreFoundation \
+		-framework MobileCoreServices
+	xcrun --sdk iphoneos strip fsmon-ios
+	xcrun --sdk iphoneos codesign -f --entitlements ./entitlements.plist -s- fsmon-ios
 
 ios:
-	$(IOS_CC) $(CFLAGS) -o fsmon-ios fsmon-darwin.c main.c util.c
-	strip fsmon-ios
+	$(IOS_CC) $(CFLAGS) -DTARGET_IOS=1 -o fsmon-ios $(SOURCES) \
+		-framework CoreFoundation \
+		-weak_framework MobileCoreServices \
+		-weak_framework CoreServices
+	xcrun --sdk iphoneos strip fsmon-ios
+	xcrun --sdk iphoneos codesign -f --entitlements ./entitlements.plist -s- fsmon-ios
+
+ios2:
+	$(MAKE) ios
+	$(MAKE) ios-patch
+
+ios-patch:
+	rabin2 -x fsmon-ios
+	export a=fsmon-ios.fat/fsmon-ios.arm_64* ; \
+		export OFF=`rabin2 -H $$a | grep -C 2 /CoreSer | head -n1 | cut -d ' ' -f 1`; \
+		echo OFF=$$OFF ; \
+		r2 -qnwc "wx 18000080 @ $$OFF-4" $$a
+	rm -f fsmon-ios
+	lipo -create -arch arm64 fsmon-ios.fat/fsmon-ios.arm_64* -arch armv7 fsmon-ios.fat/fsmon-ios.arm_32* -output fsmon-ios
+	-xcrun --sdk iphoneos codesign -f --entitlements ./entitlements.plist -s- fsmon-ios
+	rm -rf fsmon-ios.fat
 
 cydia: ios
 	$(MAKE) -C cydia
 
 osx:
-	$(CC) $(CFLAGS) -o fsmon-osx fsmon-darwin.c main.c util.c
+	$(CC) $(CFLAGS) -DTARGET_OSX=1 -o fsmon-osx $(SOURCES) -framework CoreServices
 	strip fsmon-osx
 
-wch:
-	$(WCH_CC) $(CFLAGS) -o fsmon-wch fsmon-darwin.c main.c util.c
+osx-pkg:
+	./pkg.sh
 
-fat:
+wch:
+	$(WCH_CC) $(CFLAGS) -DTARGET_WATCHOS=1 -o fsmon-wch $(SOURCES)
+
+fat: ios osx wch
 	lipo fsmon-ios -thin armv7 -output fsmon-ios-armv7
 	lipo fsmon-ios -thin arm64 -output fsmon-ios-arm64
 	lipo -create -output fsmon \
@@ -77,32 +120,64 @@ fat:
 		-arch armv7k fsmon-wch \
 		-arch x86_64 fsmon-osx
 	strip fsmon
-
-install:
-	install -m 0755 fsmon /usr/local/bin/fsmon
-
-uninstall:
-	rm -f /usr/local/bin/fsmon
+	codesign -s- fsmon
 
 clean:
 	rm -f fsmon-osx fsmon-ios
 	rm -rf fsmon*.dSYM
+	rm -f fsmon-and*
 
-.PHONY: all ios osx wch fat clean
+.PHONY: cydia ios osx osx-pkg fat wch
 
 endif
 
-LOLLIPOP_CFLAGS=-DHAVE_FANOTIFY=1 -DHAVE_SYS_FANOTIFY=0
+BINDIR=$(DESTDIR)/$(PREFIX)/bin
+MANDIR=$(DESTDIR)/$(PREFIX)/share/man/man1
+
+install:
+	mkdir -p $(BINDIR)
+	install -m 0755 fsmon $(BINDIR)/fsmon
+	mkdir -p $(MANDIR)
+	install -m 0644 fsmon.1 $(MANDIR)/fsmon.1
+
+uninstall:
+	rm -f $(BINDIR)/fsmon
+	rm -f $(MANDIR)/fsmon.1
+
+# ANDROID
+#
+# \.-----./
+# / o   o \
+# `-------'
+
 KITKAT_CFLAGS=-DHAVE_FANOTIFY=0 -DHAVE_SYS_FANOTIFY=0
+LOLLIPOP_CFLAGS=-DHAVE_FANOTIFY=1 -DHAVE_SYS_FANOTIFY=0
 
-android: lollipop
+NDK_ARCH?=
+ANDROID_ARCHS=arm arm64 x86 x86_64
+ANDROID_API?=
 
-lollipop:
-	./ndk-gcc -fPIC -pie $(LOLLIPOP_CFLAGS) $(CFLAGS) $(LDFLAGS) -o fsmon-and \
-		main.c fsmon-linux.c util.c
+ifneq ($(NDK_ARCH),)
+ANDROID_ARCHS=$(NDK_ARCH)
+endif
+AAPIMODE=$(shell test ${ANDROID_API} -gt 21 && echo aagt21compile || echo aalt21compile)
 
-kitkat:
-	./ndk-gcc -fPIC -pie $(KITKAT_CFLAGS) $(CFLAGS) $(LDFLAGS) -o fsmon-and \
-		main.c fsmon-linux.c util.c
+and android:
+	for a in $(ANDROID_ARCHS) ; do \
+		if [ -z "${NDK}" ] ; then \
+			./android-shell.sh $$a \
+			$(MAKE) $(AAPIMODE) ANDROID_API=$(ANDROID_API) NDK_ARCH=$$a ; \
+		else \
+			$(MAKE) $(AAPIMODE) ANDROID_API=$(ANDROID_API) NDK_ARCH=$$a ; \
+		fi; \
+	done
 
-.PHONY: android lollipop kitkat cydia
+aagt21compile:
+	ndk-gcc $(ANDROID_API) $(LOLLIPOP_CFLAGS) $(CFLAGS) $(LDFLAGS) -o fsmon-and$(ANDROID_API)-$(NDK_ARCH) $(SOURCES)
+
+aalt21compile:
+	ndk-gcc $(ANDROID_API) $(KITKAT_CFLAGS) $(CFLAGS) $(LDFLAGS) -o fsmon-and$(ANDROID_API)-$(NDK_ARCH) $(SOURCES)
+
+.PHONY: all fsmon clean
+.PHONY: install uninstall
+.PHONY: and android

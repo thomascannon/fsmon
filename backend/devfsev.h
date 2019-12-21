@@ -1,6 +1,10 @@
-#ifndef _INCLUDE_FSEV_H_
-#define _INCLUDE_FSEV_H_
+#ifndef INCLUDE_FM_FSEV_H
+#define INCLUDE_FM_FSEV_H
 
+/*
+  TODO: this stuff must be refactorized to not be fsev-specific
+  TODO: because it is used from non-devfsev backends
+*/
 // fsevents is available here:
 // http://www.opensource.apple.com/source/xnu/xnu-792/bsd/sys/fsevents.h
 //#include <sys/fsevents.h> would have been nice, but it's no longer available, as Apple
@@ -89,19 +93,19 @@ typedef struct kfs_event_arg {
 
 #if __LP64__
 typedef struct fsevent_clone_args {
-	int8_t  *event_list;
-	int32_t  num_events;
-	int32_t  event_queue_depth;
+	int8_t *event_list;
+	int32_t num_events;
+	int32_t event_queue_depth;
 	int32_t *fd;
 } fsevent_clone_args;
 #else
 typedef struct fsevent_clone_args {
-	int8_t  *event_list;
-	int32_t  pad1;
-	int32_t  num_events;
-	int32_t  event_queue_depth;
+	int8_t *event_list;
+	int32_t pad1;
+	int32_t num_events;
+	int32_t event_queue_depth;
 	int32_t *fd;
-	int32_t  pad2;
+	int32_t pad2;
 } fsevent_clone_args;
 #endif
 

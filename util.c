@@ -12,6 +12,9 @@
 #if __APPLE__
 #include <sys/sysctl.h>
 #endif
+#if __linux__
+#include <linux/limits.h>
+#endif
 #include <errno.h>
 #include "fsmon.h"
 
@@ -23,12 +26,16 @@ void hexdump(const uint8_t *buf, unsigned int len, int w) {
 	for (i = 0; i < len; i += w) {
 		printf ("0x%08x: ", i);
 		for (j = i; j < i + w; j++) {
-			if (j<len) printf (j%2?"%02x ":"%02x", buf[j]);
-			else printf (j%2?"   ":"  ");
+			if (j < len) {
+				printf (j%2 ? "%02x ":"%02x", buf[j]);
+			} else {
+				printf (j%2 ? "   " : "  ");
+			}
 		}
 		printf (" ");
-		for (j = i; j < i + w; j++)
+		for (j = i; j < i + w; j++) {
 			printf ("%c", isprint (buf[j])? buf[j]: '.');
+		}
 		printf ("\n");
 	}
 }
@@ -102,8 +109,8 @@ const char *fm_colorstr(int type) {
 	return (type >= 0 && type < FSE_MAX_EVENTS)? colors[type]: "";
 }
 
-const char *getProcName(int pid, int *ppid) {
-	static char path[1024] = {0};
+const char *get_proc_name(int pid, int *ppid) {
+	static char path[PATH_MAX] = {0};
 #if __APPLE__
 	struct kinfo_proc * kinfo = (struct kinfo_proc*)&path;
 	size_t len = 1000;
@@ -114,7 +121,8 @@ const char *getProcName(int pid, int *ppid) {
 	mib[2] = KERN_PROC_PID;
 	mib[3] = pid;
 
-	if ((rc = sysctl (mib, 4, path, &len, NULL, 0)) < 0) {
+	memset (path, 0, sizeof (path));
+	if ((rc = sysctl (mib, 4, path, &len, NULL, 0)) != 0) {
 		perror("trace facility failure, KERN_PROC_PID\n");
 		exit (1);
 	}
@@ -127,7 +135,7 @@ const char *getProcName(int pid, int *ppid) {
 	snprintf (path, sizeof (path), "/proc/%d/stat", pid);
 	fd = open (path, O_RDONLY);
 	if (fd == -1) {
-		eprintf ("Cannot open '%s'\n", path);
+		// eprintf ("Cannot open '%s'\n", path);
 		return NULL;
 	}
 	path[0] = 0;
@@ -154,9 +162,15 @@ const char *getProcName(int pid, int *ppid) {
 
 bool is_directory (const char *str) {
         struct stat buf = {0};
-        if (!str || !*str) return false;
-        if (stat (str, &buf) == -1) return false;
-        if ((S_IFBLK & buf.st_mode) == S_IFBLK) return false;
+        if (!str || !*str) {
+		return false;
+	}
+        if (stat (str, &buf) == -1) {
+		return false;
+	}
+        if ((S_IFBLK & buf.st_mode) == S_IFBLK) {
+		return false;
+	}
         return S_IFDIR == (S_IFDIR & buf.st_mode);
 }
 
@@ -175,7 +189,7 @@ bool copy_file(const char *src, const char *dst) {
 	}
 	fd_dst = open (dst, O_RDWR | O_CREAT | O_TRUNC, mode);
 	if (fd_dst == -1) {
-		close (fd_src);
+		(void) close (fd_src);
 		return false;
 	}
 	for (;;) {
@@ -188,4 +202,23 @@ bool copy_file(const char *src, const char *dst) {
 	(void) close (fd_src);
 	(void) close (fd_dst);
 	return true;
+}
+
+static bool isPrintable(const char ch) {
+	if (ch == '"' || ch == '\\') {
+		return false;
+	}
+	return IS_PRINTABLE (ch);
+}
+
+char *fmu_jsonfilter(const char *s) {
+	char *r, *R = strdup (s);
+	for (r = R; *r; ) {
+		if (isPrintable (*r)) {
+			r++;
+		} else {
+			memmove (r, r + 1, strlen (r) + 1);
+		}
+	}
+	return R;
 }
